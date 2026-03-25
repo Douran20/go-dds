@@ -1,4 +1,4 @@
-package dds 
+package dds
 
 import (
 	"encoding/binary"
@@ -9,9 +9,55 @@ import (
 	"io"
 )
 
+// DXGI format
+// https://learn.microsoft.com/en-us/windows/win32/api/dxgiformat/ne-dxgiformat-dxgi_format
+
 const (
 	DDSMagic = 0x20534444
-	RawSize  = 124
+
+	DXT1 = "DXT1"
+	DXT3 = "DXT3"
+	DXT5 = "DXT5"
+	ATI1 = "ATI1"
+	ATI2 = "ATI2"
+
+	R16G16B16A16_UNORM         = 11
+	R16G16B16A16_SNORM         = 13
+	R10G10B10A2_UNORM          = 24
+	R8G8B8A8_UNORM             = 28
+	R8G8B8A8_UNORM_SRGB        = 29
+	R8G8B8A8_SNORM             = 31
+	R16G16_UNORM               = 35
+	R16G16_SNORM               = 37
+	R8G8_UNORM                 = 49
+	R8G8_SNORM                 = 51
+	D16_UNORM                  = 55
+	R16_UNORM                  = 56
+	R16_SNORM                  = 58
+	R8_UNORM                   = 61
+	R8_SNORM                   = 63
+	A8_UNORM                   = 65
+	R1_UNORM                   = 66
+	R8G8_B8G8_UNORM            = 68
+	G8R8_G8B8_UNORM            = 69
+	BC1_UNORM                  = 71
+	BC1_UNORM_SRGB             = 72
+	BC2_UNORM                  = 74
+	BC2_UNORM_SRGB             = 75
+	BC3_UNORM                  = 77
+	BC3_UNORM_SRGB             = 78
+	BC4_UNORM                  = 80
+	BC4_SNORM                  = 81
+	BC5_UNORM                  = 83
+	BC5_SNORM                  = 84
+	B5G6R5_UNORM               = 85
+	B5G5R5A1_UNORM             = 86
+	B8G8R8A8_UNORM             = 87
+	B8G8R8X8_UNORM             = 88
+	B8G8R8A8_UNORM_SRGB        = 91
+	B8G8R8X8_UNORM_SRGB        = 93
+	BC7_UNORM                  = 98
+	BC7_UNORM_SRGB             = 99
 )
 
 const (
@@ -51,6 +97,14 @@ type DDHeader struct {
 	Reserved2         uint32
 }
 
+type DX10Header struct {
+	DXGIFormat        uint32
+	ResourceDimension uint32
+	MiscFlag          uint32
+	ArraySize         uint32
+	MiscFlags2        uint32
+}
+
 type Image struct {
 	Header *DDHeader
 	Pix    []color.RGBA
@@ -79,28 +133,37 @@ func lerp(c1, c2 color.RGBA, w1, w2 int) color.RGBA {
 	}
 }
 
-func ParseHeader(r io.Reader) (*DDHeader, error) {
+func ParseHeader(r io.Reader) (*DDHeader, *DX10Header, error) {
 	var magic uint32
 	if err := binary.Read(r, binary.LittleEndian, &magic); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if magic != DDSMagic {
-		return nil, errors.New("not a valid DDS file")
+		return nil, nil, errors.New("not a valid DDS file")
 	}
 
 	header := &DDHeader{}
 	if err := binary.Read(r, binary.LittleEndian, header); err != nil {
-		return nil, err
+		fmt.Println("IF Generic == TRUE")
+		return nil, nil, err
 	}
 
-	if header.Size != RawSize {
-		return nil, errors.New("invalid DDS header size")
+	if header.Size != 124 {
+		return nil, nil, errors.New("invalid DDS header size. Must be 124 bytes")
 	}
 
-	return header, nil
+	var dxt10 *DX10Header
+	if string(header.Format.FourCC[:]) == "DX10" {
+		dxt10 = &DX10Header{}
+		if err := binary.Read(r, binary.LittleEndian, dxt10); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	return header, dxt10, nil
 }
 
-func decodeDXT1(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
+func decodeBC1(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	width, height := int(h.Width), int(h.Height)
 	pixels := make([]color.RGBA, width*height)
 
@@ -119,16 +182,16 @@ func decodeDXT1(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 
 			palette := [4]color.RGBA{c0, c1, {}, {}}
 			if color0Raw > color1Raw {
-				palette[2] = lerp(c0, c1, 2, 1) 
-				palette[3] = lerp(c0, c1, 1, 2) 
+				palette[2] = lerp(c0, c1, 2, 1)
+				palette[3] = lerp(c0, c1, 1, 2)
 			} else {
-				palette[2] = lerp(c0, c1, 1, 1)     
-				palette[3] = color.RGBA{0, 0, 0, 0} 
+				palette[2] = lerp(c0, c1, 1, 1)
+				palette[3] = color.RGBA{0, 0, 0, 0}
 			}
-	
+
 			for py := 0; py < 4; py++ {
 				for px := 0; px < 4; px++ {
-					if xBlock+px < width && yBlock+py < height {	
+					if xBlock+px < width && yBlock+py < height {
 						bitOffset := uint((py*4 + px) * 2)
 						idx := (indices >> bitOffset) & 0x03
 
@@ -142,13 +205,13 @@ func decodeDXT1(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	return pixels, nil
 }
 
-func decodeDXT3(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
+func decodeBC2(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	width, height := int(h.Width), int(h.Height)
 	pixels := make([]color.RGBA, width*height)
 
 	for yBlock := 0; yBlock < height; yBlock += 4 {
 		for xBlock := 0; xBlock < width; xBlock += 4 {
-			
+
 			var alphaRaw uint64
 			binary.Read(r, binary.LittleEndian, &alphaRaw)
 
@@ -178,7 +241,7 @@ func decodeDXT3(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 						finalColor := colorPalette[cIdx]
 
 						a4 := uint8((alphaRaw >> (pixelNum * 4)) & 0x0F)
-						
+
 						finalColor.A = (a4 << 4) | a4
 
 						pixelIdx := (yBlock+py)*width + (xBlock + px)
@@ -191,7 +254,7 @@ func decodeDXT3(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	return pixels, nil
 }
 
-func decodeDXT5(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
+func decodeBC3(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	width, height := int(h.Width), int(h.Height)
 	pixels := make([]color.RGBA, width*height)
 
@@ -288,7 +351,7 @@ func readBC4Block(r io.Reader) ([8]uint8, uint64) {
 	return palette, indices
 }
 
-func decodeATI1(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
+func decodeBC4(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	width, height := int(h.Width), int(h.Height)
 	pixels := make([]color.RGBA, width*height)
 
@@ -313,13 +376,13 @@ func decodeATI1(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	return pixels, nil
 }
 
-func decodeATI2(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
+func decodeBC5(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 	width, height := int(h.Width), int(h.Height)
 	pixels := make([]color.RGBA, width*height)
 
 	for yBlock := 0; yBlock < height; yBlock += 4 {
 		for xBlock := 0; xBlock < width; xBlock += 4 {
-			
+
 			redPalette, redIndices := readBC4Block(r)
 
 			greenPalette, greenIndices := readBC4Block(r)
@@ -328,7 +391,7 @@ func decodeATI2(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 				for px := 0; px < 4; px++ {
 					if xBlock+px < width && yBlock+py < height {
 						pixelNum := uint(py*4 + px)
-						
+
 						rIdx := (redIndices >> (pixelNum * 3)) & 0x07
 						gIdx := (greenIndices >> (pixelNum * 3)) & 0x07
 
@@ -336,7 +399,7 @@ func decodeATI2(r io.Reader, h *DDHeader) ([]color.RGBA, error) {
 						pixels[pixelIdx] = color.RGBA{
 							R: redPalette[rIdx],
 							G: greenPalette[gIdx],
-							B: 0, // need to check if BC5 actually stores a Z component 
+							B: 0, // need to check if BC5 actually stores a Z component
 							A: 255,
 						}
 					}
@@ -352,40 +415,65 @@ func init() {
 }
 
 func Decode(r io.Reader) (image.Image, error) {
-	h, err := ParseHeader(r)
+	h, dx10, err := ParseHeader(r)
 	if err != nil {
 		return nil, err
 	}
 
-	fourCC := string(h.Format.FourCC[:])
+	if dx10 != nil {
+		switch dx10.DXGIFormat {
+		case BC1_UNORM, BC1_UNORM_SRGB:
+			pix, err := decodeBC1(r, h)
+			if err != nil {
+				return nil, err
+			}
+			return &Image{Header: h, Pix: pix}, nil	
+		case BC2_UNORM, BC2_UNORM_SRGB:	
+			pix, err := decodeBC2(r, h)
+			if err != nil {
+				return nil, err
+			}
+			return &Image{Header: h, Pix: pix}, nil
+		case BC3_UNORM, BC3_UNORM_SRGB:	
+			pix, err := decodeBC3(r, h)
+			if err != nil {
+				return nil, err
+			}
+			return &Image{Header: h, Pix: pix}, nil
+		default:
+			dxgi_link := "https://learn.microsoft.com/en-us/windows/win32/api/dxgiformat/ne-dxgiformat-dxgi_format"
+			return nil, fmt.Errorf("unsupported or unhandled DXGI format: [%d]\nSupported formats: %s", dx10.DXGIFormat, dxgi_link)
+		}
+	}
 
+	fourCC := string(h.Format.FourCC[:])
 	switch fourCC {
-	case "DXT1":
-		pix, err := decodeDXT1(r, h)
+	case DXT1:
+		pix, err := decodeBC1(r, h)
 		if err != nil {
 			return nil, err
 		}
 		return &Image{Header: h, Pix: pix}, nil
-	case "DXT3":
-		pix, err := decodeDXT3(r, h)
+	case DXT3:
+		pix, err := decodeBC2(r, h)
 		if err != nil {
 			return nil, err
 		}
 		return &Image{Header: h, Pix: pix}, nil
-	case "DXT5":
-		pix, err := decodeDXT5(r, h)
+	case DXT5:
+		pix, err := decodeBC3(r, h)
 		if err != nil {
 			return nil, err
 		}
 		return &Image{Header: h, Pix: pix}, nil
-	case "ATI1":
-		pix, err := decodeATI1(r, h)
+	case ATI1:
+		pix, err := decodeBC4(r, h)
 		if err != nil {
 			return nil, err
 		}
 		return &Image{Header: h, Pix: pix}, nil
-	case "ATI2":
-		pix, err := decodeATI2(r, h)
+	case ATI2:
+		pix, err := decodeBC5(r, h)
 		if err != nil {
 			return nil, err
 		}
